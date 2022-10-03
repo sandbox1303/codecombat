@@ -24,10 +24,12 @@ Levels = require 'collections/Levels'
 NameLoader = require 'core/NameLoader'
 Campaign = require 'models/Campaign'
 ThangType = require 'models/ThangType'
+Mandate = require 'models/Mandate'
 utils = require 'core/utils'
 store = require 'core/store'
 leaderboardApi = require 'core/api/leaderboard'
 clansApi = require 'core/api/clans'
+coursesHelper = require 'lib/coursesHelper'
 
 class LadderCollection extends CocoCollection
   url: ''
@@ -80,31 +82,46 @@ module.exports = class CoursesView extends RootView
     @ownedClassrooms.fetchMine({data: {project: '_id'}})
     @supermodel.trackCollection(@ownedClassrooms)
     @supermodel.addPromiseResource(store.dispatch('courses/fetch'))
+    if utils.isOzaria
+      @hourOfCodeOptions = utils.hourOfCodeOptions
+      @hocCodeLanguage = (me.get('hourOfCodeOptions') || {}).hocCodeLanguage || 'python'
+      @hocStats = {}
+      @listenTo @classrooms, 'sync', ->
+        if @showHocProgress()
+          campaign = @hourOfCodeOptions.campaignId
+          sessionFetchOptions = {
+            language: @hocCodeLanguage,
+            project: 'state.complete,level.original,playtime,changed'
+          }
+          @supermodel.addPromiseResource(store.dispatch('levelSessions/fetchLevelSessionsForCampaign', {campaignHandle: campaign, options: {data: sessionFetchOptions}}))
+          @campaignLevels = new Levels()
+          @supermodel.trackRequest(@campaignLevels.fetchForCampaign(@hourOfCodeOptions.campaignId, { data: { project: "original,primerLanguage,slug,i18n.#{me.get('preferredLanguage', true)}" }}))
     @store = store
     @originalLevelMap = {}
     @urls = require('core/urls')
 
-    @ladderImageMap = {}
-    @ladders = @supermodel.loadCollection(new LadderCollection()).model
-    @listenToOnce @ladders, 'sync', @onLaddersLoaded
+    if utils.isCodeCombat
+      @ladderImageMap = {}
+      @ladders = @supermodel.loadCollection(new LadderCollection()).model
+      @listenToOnce @ladders, 'sync', @onLaddersLoaded
 
-    if me.get('role') is 'student'
-      tournaments = new CocoCollection([], { url: "/db/tournaments?memberId=#{me.id}", model: Tournament})
-      @listenToOnce tournaments, 'sync', =>
-        @tournaments = (t.toJSON() for t in tournaments.models)
-        @tournamentsByState = _.groupBy @tournaments, 'state'
-        @renderSelectors('.student-profile-area')
-      @supermodel.loadCollection(tournaments, 'tournaments', {cache: false})
+      if me.get('role') is 'student'
+        tournaments = new CocoCollection([], { url: "/db/tournaments?memberId=#{me.id}", model: Tournament})
+        @listenToOnce tournaments, 'sync', =>
+          @tournaments = (t.toJSON() for t in tournaments.models)
+          @tournamentsByState = _.groupBy @tournaments, 'state'
+          @renderSelectors('.student-profile-area')
+        @supermodel.loadCollection(tournaments, 'tournaments', {cache: false})
 
-    # TODO: Trim this section for only what's necessary
-    @hero = new ThangType
-    defaultHeroOriginal = ThangType.heroes.captain
-    heroOriginal = me.get('heroConfig')?.thangType or defaultHeroOriginal
-    @hero.url = "/db/thang.type/#{heroOriginal}/version"
-    # @hero.setProjection ['name','slug','soundTriggers','featureImages','gems','heroClass','description','components','extendedName','shortName','unlockLevelName','i18n']
-    @supermodel.loadModel(@hero, 'hero')
-    @listenTo @hero, 'change', -> @renderSelectors('.current-hero') if @supermodel.finished()
-    @loadAILeagueStats()
+      # TODO: Trim this section for only what's necessary
+      @hero = new ThangType
+      defaultHeroOriginal = ThangType.heroes.captain
+      heroOriginal = me.get('heroConfig')?.thangType or defaultHeroOriginal
+      @hero.url = "/db/thang.type/#{heroOriginal}/version"
+      # @hero.setProjection ['name','slug','soundTriggers','featureImages','gems','heroClass','description','components','extendedName','shortName','unlockLevelName','i18n']
+      @supermodel.loadModel(@hero, 'hero')
+      @listenTo @hero, 'change', -> @renderSelectors('.current-hero') if @supermodel.finished()
+      @loadAILeagueStats()
 
   loadAILeagueStats: ->
     @randomAILeagueBannerHero = _.sample ['anya', 'ida', 'okar']
@@ -243,43 +260,44 @@ module.exports = class CoursesView extends RootView
       @render?()
     )
 
-    academicaCS1CourseInstance = _.find(@courseInstances.models ? [], (ci) -> ci.get('_id') is '610047c74bc544001e26ea12')
-    if academicaCS1CourseInstance
-      academicaGlobalClassroom = _.find(@classrooms.models ? [], (c) -> c.get('_id') is '610047c673801a001f85fd43')
-      if not academicaGlobalClassroom and utils.getQueryVariable('autorefresh') isnt true
-        # Refresh so that we make sure we get this loaded
-        window.location.href = '/students?autorefresh=true'
+    if utils.isCodeCombat
+      academicaCS1CourseInstance = _.find(@courseInstances.models ? [], (ci) -> ci.get('_id') is '610047c74bc544001e26ea12')
+      if academicaCS1CourseInstance
+        academicaGlobalClassroom = _.find(@classrooms.models ? [], (c) -> c.get('_id') is '610047c673801a001f85fd43')
+        if not academicaGlobalClassroom and utils.getQueryVariable('autorefresh') isnt true
+          # Refresh so that we make sure we get this loaded
+          window.location.href = '/students?autorefresh=true'
 
-    if not @classrooms.models.length
-      @nextLevelInfo = courseAcronym: 'CS1'  # Don't both trying to figure out the next level for edge case of student with no classrooms
-      @allCompleted = false
-      return
+      if not @classrooms.models.length
+        @nextLevelInfo = courseAcronym: 'CS1'  # Don't both trying to figure out the next level for edge case of student with no classrooms
+        @allCompleted = false
+        return
 
-    @allCompleted = not _.some @classrooms.models, ((classroom) ->
-      _.some @courseInstances.where({classroomID: classroom.id}), ((courseInstance) ->
-        course = @store.state.courses.byId[courseInstance.get('courseID')]
-        stats = classroom.statsForSessions(courseInstance.sessions, course._id)
-        if stats.levels?.next
-          # This could be made smarter than just picking the next level from the first incomplete course
-          # It will suggest redoing a course arena level, like Wakka Maul, if all courses are complete
-          @nextLevelInfo =
-            level: stats.levels.next
-            courseInstance: courseInstance
-            course: course
-            courseAcronym: utils.courseAcronyms[course._id]
-            number: stats.levels.nextNumber
-          if startLockedLevelSlug = courseInstance.get 'startLockedLevel'
-            courseLevels = classroom.getLevels courseID: course._id
-            hasLocked = false
-            for level in courseLevels.models
-              if level.get('slug') is startLockedLevelSlug
-                hasLocked = true
-              if level.get('slug') is @nextLevelInfo.level.get('slug')
-                @nextLevelInfo.locked = true if hasLocked
-                break
-        not stats.courseComplete
+      @allCompleted = not _.some @classrooms.models, ((classroom) ->
+        _.some @courseInstances.where({classroomID: classroom.id}), ((courseInstance) ->
+          course = @store.state.courses.byId[courseInstance.get('courseID')]
+          stats = classroom.statsForSessions(courseInstance.sessions, course._id)
+          if stats.levels?.next
+            # This could be made smarter than just picking the next level from the first incomplete course
+            # It will suggest redoing a course arena level, like Wakka Maul, if all courses are complete
+            @nextLevelInfo =
+              level: stats.levels.next
+              courseInstance: courseInstance
+              course: course
+              courseAcronym: utils.courseAcronyms[course._id]
+              number: stats.levels.nextNumber
+            if startLockedLevelSlug = courseInstance.get 'startLockedLevel'
+              courseLevels = classroom.getLevels courseID: course._id
+              hasLocked = false
+              for level in courseLevels.models
+                if level.get('slug') is startLockedLevelSlug
+                  hasLocked = true
+                if level.get('slug') is @nextLevelInfo.level.get('slug')
+                  @nextLevelInfo.locked = true if hasLocked
+                  break
+          not stats.courseComplete
+          ), this
         ), this
-      ), this
 
     _.forEach _.unique(_.pluck(@classrooms.models, 'id')), (classroomID) =>
       levels = new Levels()
@@ -288,6 +306,57 @@ module.exports = class CoursesView extends RootView
         @originalLevelMap[level.get('original')] = level for level in levels.models
         @render()
       @supermodel.trackRequest(levels.fetchForClassroom(classroomID, { data: { project: "original,primerLanguage,slug,name,i18n.#{me.get('preferredLanguage', true)}" }}))
+
+    if utils.isOzaria
+      if features.china and @classrooms.find {id: '5d0082964ebb960059fc40b2'}
+        if new Date() >= new Date(2019, 5, 19, 12) && new Date() <= new Date(2019, 5, 25, 0)
+          if window.serverConfig?.currentTournament
+            @showTournament = true
+          else
+            @awaitingTournament = true
+            @checkForTournamentStart()
+
+      if @showHocProgress()
+        @calculateHocStats()
+
+  showHocProgress: ->
+    hocClassrooms = @classrooms.models.find((c) =>
+      return c.get('courses').filter((course) => c._id == @hourOfCodeOptions.courseId) && c.get('aceConfig').language == @hocCodeLanguage
+    ) || []
+    # show showHocProgress if student signed up using the end modal, and there are no relevant classrooms
+    if hocClassrooms.length == 0 and (me.get('hourOfCodeOptions') || {}).showHocProgress
+      return true
+
+  calculateHocStats: ->
+    hocCampaignSessions = (store.getters?['levelSessions/getSessionsForCampaign'](@hourOfCodeOptions.campaignId) || {}).sessions || []
+    campaignSessions = _.sortBy(hocCampaignSessions, (s) -> s.changed)
+    levelSessionMap = {}
+    campaignSessions.forEach((s) => levelSessionMap[s.level.original] = s)
+    userLevelStatusMap = {}
+    levelsInCampaign = new Set()
+    @campaignLevels.models.forEach((l) =>
+      if (levelSessionMap[l.get('original')]?.state.complete)
+        userLevelStatusMap[l.get('original')] = true
+      else
+        userLevelStatusMap[l.get('original')] = false
+      levelsInCampaign.add(l.get('original'))
+    )
+    [started, completed, levelsDone] = coursesHelper.hasUserCompletedCourse(userLevelStatusMap, levelsInCampaign)
+    @hocStats = {
+      complete: completed
+      pctDone: (levelsDone / @campaignLevels.models.length * 100).toFixed(1) + '%'
+    }
+
+  checkForTournamentStart: =>
+    return if @destroyed
+    $.get '/db/mandate', (data) =>
+      return if @destroyed
+      if data?[0]?.currentTournament
+        @showTournament = true
+        @awaitingTournament = false
+        @render()
+      else
+        setTimeout @checkForTournamentStart, 60 * 1000
 
   courseInstanceHasProject: (courseInstance) ->
     classroom = @classrooms.get(courseInstance.get('classroomID'))
@@ -369,7 +438,7 @@ module.exports = class CoursesView extends RootView
     if jqxhr.status is 422
       @errorMessage = 'Please enter a code.'
     else if jqxhr.status is 404
-      @errorMessage = $.t('signup.classroom_not_found')
+      @errorMessage = $.i18n.t('signup.classroom_not_found')
     else if jqxhr.status is 403
       @errorMessage = $.t('signup.activation_code_used')
     else
@@ -423,10 +492,13 @@ module.exports = class CoursesView extends RootView
     courseID = $(e.target).data('course-id')
     courseInstanceID = $(e.target).data('courseinstance-id')
     window.tracker?.trackEvent 'Students View Levels', category: 'Students', courseID: courseID, courseInstanceID: courseInstanceID
-    course = store.state.courses.byId[courseID]
-    courseInstance = @courseInstances.get(courseInstanceID)
-    levelsUrl = @urls.courseWorldMap({course, courseInstance})
-    application.router.navigate(levelsUrl, { trigger: true })
+    if utils.isCodeCombat
+      course = store.state.courses.byId[courseID]
+      courseInstance = @courseInstances.get(courseInstanceID)
+      levelsUrl = @urls.courseWorldMap({course, courseInstance})
+      application.router.navigate(levelsUrl, { trigger: true })
+    if utils.isOzaria
+      application.router.navigate($(e.currentTarget).data('href'), { trigger: true })
 
   onClickViewProjectGalleryLink: (e) ->
     courseID = $(e.target).data('course-id')
@@ -446,6 +518,12 @@ module.exports = class CoursesView extends RootView
     courseName = $(e.target).data('course-name')
     window.tracker?.trackEvent 'Students View To Videos View', category: 'Students', courseID: courseID, classroomID: classroomID
     application.router.navigate("/students/videos/#{courseID}/#{courseName}", { trigger: true })
+
+  afterRender: ->
+    super()
+    if utils.isOzaria
+      rulesContent = @$el.find('#tournament-rules-content').html()
+      @$el.find('#tournament-rules').popover(placement: 'bottom', trigger: 'hover', container: '#site-content-area', content: rulesContent, html: true)
 
   onClickAnnouncementLink: (e) ->
     classroomId = $(e.target).data('classroom-id')
@@ -476,6 +554,27 @@ module.exports = class CoursesView extends RootView
   onLaddersLoaded: (e) ->
     for ladder in @ladders.models
       @ladderImageMap[ladder.get('original')] = ladder.get('image')
+
+  tournamentArenas: ->
+    if @showTournament
+      if /^zh/.test me.get('preferredLanguage', true)
+        [
+          {
+            name: '魔力冲刺'
+            id: 'magic-rush'
+            image: '/file/db/level/5b3c9e7259cae7002f0a3980/magic-rush-zh-HANS.jpg'
+          }
+        ]
+      else
+        [
+          {
+            name: 'Magic Rush'
+            id: 'magic-rush'
+            image: '/file/db/level/5b3c9e7259cae7002f0a3980/magic-rush.jpg'
+          }
+        ]
+    else
+      []
 
 nextLevelBannerImages = {
   'arena-ace-of-coders.png': {heroes: ['goliath'], courses: ['CS5', 'CS6']}
