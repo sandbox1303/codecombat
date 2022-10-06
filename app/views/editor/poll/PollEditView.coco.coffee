@@ -7,6 +7,7 @@ PollModal = require 'views/play/modal/PollModal'
 ConfirmModal = require 'views/core/ConfirmModal'
 PatchesView = require 'views/editor/PatchesView'
 errors = require 'core/errors'
+utils = require 'core/utils'
 
 require 'lib/game-libraries'
 
@@ -42,7 +43,7 @@ module.exports = class PollEditView extends RootView
   onLoaded: ->
     super()
 
-    if @poll.get('answers') == undefined
+    if utils.isCodeCombat and @poll.get('answers') == undefined
       @poll.set('hidden', true)
 
     @buildTreema()
@@ -88,30 +89,36 @@ module.exports = class PollEditView extends RootView
       @treema.set '/answers', @pollModal.poll.get('answers')
       @hush = false
 
-  # Validate that nextPoll is a valid poll, throwing if nextPoll is invalid.
-  validateNextPollIds: (data) ->
-    data ?= []
-    currentPollId = @poll.get('_id')
-    responsePromises = data
-      .filter(({ nextPoll }) -> nextPoll)
-      .map(({nextPoll, key}) ->
-        if nextPoll == currentPollId
-          throw new Error("Aborted save: Error with nextPoll in answer with key: '#{key}' - Do not reference the same poll in an answer.")
-        return fetch("/db/poll/#{nextPoll}")
-          .then((r) ->
-            if !r.ok
-              throw new Error("Aborted save: Error with nextPoll in answer with key: '#{key}' - Poll with this id doesn't exist.")
-          )
-      )
+  if utils.isCodeCombat
+    # Validate that nextPoll is a valid poll, throwing if nextPoll is invalid.
+    validateNextPollIds: (data) ->
+      data ?= []
+      currentPollId = @poll.get('_id')
+      responsePromises = data
+        .filter(({ nextPoll }) -> nextPoll)
+        .map(({nextPoll, key}) ->
+          if nextPoll == currentPollId
+            throw new Error("Aborted save: Error with nextPoll in answer with key: '#{key}' - Do not reference the same poll in an answer.")
+          return fetch("/db/poll/#{nextPoll}")
+            .then((r) ->
+              if !r.ok
+                throw new Error("Aborted save: Error with nextPoll in answer with key: '#{key}' - Poll with this id doesn't exist.")
+            )
+        )
 
-    return Promise.all(responsePromises)
+      return Promise.all(responsePromises)
 
   savePoll: (e) ->
     @treema.endExistingEdits()
     for key, value of @treema.data
       @poll.set(key, value)
 
-    @validateNextPollIds(@poll.get('answers')).then(() =>
+    if utils.isCodeCombat
+      promise = @validateNextPollIds(@poll.get('answers'))
+    else
+      promise = Promise.resolve()
+
+    promise.then(() =>
       res = @poll.save()
 
       res.error (collection, response, options) =>

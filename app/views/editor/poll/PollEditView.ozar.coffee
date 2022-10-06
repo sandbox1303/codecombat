@@ -7,6 +7,7 @@ PollModal = require 'views/play/modal/PollModal'
 ConfirmModal = require 'views/core/ConfirmModal'
 PatchesView = require 'views/editor/PatchesView'
 errors = require 'core/errors'
+utils = require 'core/utils'
 
 require 'lib/game-libraries'
 
@@ -41,6 +42,10 @@ module.exports = class PollEditView extends RootView
 
   onLoaded: ->
     super()
+
+    if utils.isCodeCombat and @poll.get('answers') == undefined
+      @poll.set('hidden', true)
+
     @buildTreema()
     @listenTo @poll, 'change', =>
       @poll.updateI18NCoverage()
@@ -84,19 +89,45 @@ module.exports = class PollEditView extends RootView
       @treema.set '/answers', @pollModal.poll.get('answers')
       @hush = false
 
+  if utils.isCodeCombat
+    # Validate that nextPoll is a valid poll, throwing if nextPoll is invalid.
+    validateNextPollIds: (data) ->
+      data ?= []
+      currentPollId = @poll.get('_id')
+      responsePromises = data
+        .filter(({ nextPoll }) -> nextPoll)
+        .map(({nextPoll, key}) ->
+          if nextPoll == currentPollId
+            throw new Error("Aborted save: Error with nextPoll in answer with key: '#{key}' - Do not reference the same poll in an answer.")
+          return fetch("/db/poll/#{nextPoll}")
+            .then((r) ->
+              if !r.ok
+                throw new Error("Aborted save: Error with nextPoll in answer with key: '#{key}' - Poll with this id doesn't exist.")
+            )
+        )
+
+      return Promise.all(responsePromises)
+
   savePoll: (e) ->
     @treema.endExistingEdits()
     for key, value of @treema.data
       @poll.set(key, value)
 
-    res = @poll.save()
+    if utils.isCodeCombat
+      promise = @validateNextPollIds(@poll.get('answers'))
+    else
+      promise = Promise.resolve()
 
-    res.error (collection, response, options) =>
-      console.error response
+    promise.then(() =>
+      res = @poll.save()
 
-    res.success =>
-      url = "/editor/poll/#{@poll.get('slug') or @poll.id}"
-      document.location.href = url
+      res.error (collection, response, options) =>
+        console.error response
+
+      res.success =>
+        url = "/editor/poll/#{@poll.get('slug') or @poll.id}"
+        document.location.href = url
+    )
 
   confirmDeletion: ->
     renderData =
