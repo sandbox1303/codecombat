@@ -61,7 +61,8 @@ module.exports = class PlayHeroesModal extends ModalView
   onHeroesLoaded: ->
     @heroes.reset(@heroes.filter((hero) => not hero.get('ozaria')))
     @formatHero hero for hero in @heroes.models
-    @heroes.reset(@heroes.filter((hero) => not hero.hidden))
+    if utils.isCodeCombat
+      @heroes.reset(@heroes.filter((hero) => not hero.hidden))
     if me.freeOnly() or application.getHocCampaign()
       @heroes.reset(@heroes.filter((hero) => !hero.locked))
     unless me.isAdmin()
@@ -83,10 +84,11 @@ module.exports = class PlayHeroesModal extends ModalView
       hero.restricted = not (hero.get('original') in allowedHeroes)
     hero.class = (hero.get('heroClass') or 'warrior').toLowerCase()
     hero.stats = hero.getHeroStats()
-    if clanHero = _.find(utils.clanHeroes, thangTypeOriginal: hero.get('original'))
-      hero.hidden = true if clanHero.clanId not in (me.get('clans') ? [])
-    if hero.get('original') is ThangTypeConstants.heroes['code-ninja']
-      hero.hidden = window.location.host isnt 'coco.code.ninja'
+    if utils.isCodeCombat
+      if clanHero = _.find(utils.clanHeroes, thangTypeOriginal: hero.get('original'))
+        hero.hidden = true if clanHero.clanId not in (me.get('clans') ? [])
+      if hero.get('original') is ThangTypeConstants.heroes['code-ninja']
+        hero.hidden = window.location.host isnt 'coco.code.ninja'
 
   currentVisiblePremiumFeature: ->
     isPremium = @visibleHero and not (@visibleHero.class is 'warrior' and @visibleHero.get('tier') is 0)
@@ -308,7 +310,7 @@ module.exports = class PlayHeroesModal extends ModalView
   #- Exiting
 
   saveAndHide: ->
-    if !me.hasSubscription() and @subscriberCodeLanguageList.find((l) => l.id == @codeLanguage)
+    if utils.isCodeCombat and !me.hasSubscription() and @subscriberCodeLanguageList.find((l) => l.id == @codeLanguage)
       @openModalView new SubscribeModal()
       window.tracker?.trackEvent 'Show subscription modal', category: 'Subscription', label: 'hero subscribe modal: experimental language'
       return
